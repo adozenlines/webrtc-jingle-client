@@ -32,17 +32,36 @@
 #include "client/txmppsocket.h"
 #include "talk/base/logging.h"
 
-namespace tuenti {
-TXmppPump::TXmppPump(TXmppPumpNotify * notify){
-  LOGI("TXmppPump::TXmppPump");
-  state_ = buzz::XmppEngine::STATE_NONE;
-  notify_ = notify;
-  client_ = NULL;
-  socket_ = NULL;
-  auth_ = NULL;
-  xmpp_log_ = NULL;
-}
+#if IOS_XMPP_FRAMEWORK
+#include "VoiceClientExample/IOSXmppClient.h"
+#include "VoiceClientExample/VoiceClientDelegate.h"
+#endif
 
+namespace tuenti {
+    
+#ifdef IOS_XMPP_FRAMEWORK
+    TXmppPump::TXmppPump(TXmppPumpNotify * notify, VoiceClientDelegate* voiceClientDelegate){
+        LOGI("TXmppPump::TXmppPump");
+        state_ = buzz::XmppEngine::STATE_NONE;
+        notify_ = notify;
+        client_ = new tictok::IOSXmppClient(this, voiceClientDelegate); //Will be deleted by TaskRunner
+        voiceClientDelegate->SetClient(client_);
+        xmpp_log_ = NULL;
+        disconnecting_ = false;
+    }
+#else
+    TXmppPump::TXmppPump(TXmppPumpNotify * notify){
+        LOGI("TXmppPump::TXmppPump");
+        state_ = buzz::XmppEngine::STATE_NONE;
+        notify_ = notify;
+        client_ = NULL;
+        socket_ = NULL;
+        auth_ = NULL;
+        xmpp_log_ = NULL;
+        disconnecting_ = false;
+    }
+#endif
+    
 TXmppPump::~TXmppPump() {
   LOGI("TXmppPump::~TXmppPump this@(0x%x)",
           reinterpret_cast<int>(this));
@@ -52,15 +71,18 @@ void TXmppPump::DoLogin(const buzz::XmppClientSettings & xcs) {
   LOGI("TXmppPump::DoLogin");
   xcs_ = xcs;
 
-  if (socket_ == NULL) {
-    socket_ = new TXmppSocket(xcs_.use_tls());  // NOTE: deleted by TaskRunner
-  }
-  if (auth_ == NULL) {
-    auth_ = new TXmppAuth();  // NOTE: deleted by TaskRunner
-  }
-  if (client_ == NULL) {
-    client_ = new buzz::XmppClient(this);  // NOTE: deleted by TaskRunner
-  }
+#if !IOS_XMPP_FRAMEWORK
+    if (socket_ == NULL) {
+        socket_ = new TXmppSocket(xcs_.use_tls());  // NOTE: deleted by TaskRunner
+    }
+    if (auth_ == NULL) {
+        auth_ = new TXmppAuth();  // NOTE: deleted by TaskRunner
+    }
+    if (client_ == NULL) {
+        client_ = new buzz::XmppClient(this);  // NOTE: deleted by TaskRunner
+    }
+#endif
+
 
 #if XMPP_LOG_STANZAS
   xmpp_log_ = new XmppLog();
@@ -74,21 +96,28 @@ void TXmppPump::DoLogin(const buzz::XmppClientSettings & xcs) {
     OnStateChange(buzz::XmppEngine::STATE_START);
     LOGI("TXmppPump::DoLogin - logging on");
     client_->SignalStateChange.connect(this, &TXmppPump::OnStateChange);
+#if IOS_XMPP_FRAMEWORK
+    client_->SignalCloseEvent.connect(this, &TXmppPump::OnXmppSocketClose);
+    client_->Connect(xcs, "");
+#else
     socket_->SignalCloseEvent.connect(this, &TXmppPump::OnXmppSocketClose);
     client_->Connect(xcs, "", socket_, auth_);
+#endif
     client_->Start();
   }
 }
 
 void TXmppPump::DoDisconnect() {
   LOGI("TXmppPump::DoDisconnect");
-  // Maybe we don't need both conditions
-  if (client_ && !AllChildrenDone()) {
+  talk_base::CritScope lock(&disconnect_cs_);
+  if (!disconnecting_ && !AllChildrenDone()) {
+    disconnecting_ = true;
     client_->Disconnect();
 #if XMPP_LOG_STANZAS
     delete xmpp_log_;
     xmpp_log_ = NULL;
 #endif  // XMPP_LOG_STANZAS
+    client_ = NULL;
   }
   OnStateChange(buzz::XmppEngine::STATE_CLOSED);
 }
@@ -108,6 +137,11 @@ void TXmppPump::OnStateChange(buzz::XmppEngine::State state) {
 void TXmppPump::OnXmppSocketClose(int state) {
   if (notify_ != NULL) {
     notify_->OnXmppSocketClose(state);
+  }
+
+  //Extra clean up for a socket close that wasn't originated by a logout.
+  if (!disconnecting_ && state_ != buzz::XmppEngine::STATE_CLOSED) {
+    DoDisconnect();
   }
 }
 

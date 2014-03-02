@@ -34,16 +34,17 @@
 #include "talk/base/constructormagic.h"
 #include "talk/base/thread.h"
 #include "talk/base/sigslot.h"
-#include "client/txmpppump.h"  // Needed for TXmppPumpNotify
 #include "talk/p2p/base/session.h"  // Needed for enum cricket::Session::State
 #include "talk/media/base/mediachannel.h"  // Needed for enum cricket::ReceiveDataParams
-#include "talk/base/basicpacketsocketfactory.h"
+#include "talk/p2p/base/basicpacketsocketfactory.h"
+#include "talk/base/criticalsection.h"
 #include "talk/base/scoped_ptr.h"
 #include "talk/base/physicalsocketserver.h"
 #include "talk/xmpp/pingtask.h"
 #include "talk/xmpp/rostermodule.h"
 #include "talk/xmpp/xmppengine.h"
 
+#include "client/client_defines.h"
 #include "client/xmppmessage.h"
 #include "client/sendmessagetask.h"
 #include "client/receivemessagetask.h"
@@ -51,7 +52,10 @@
 #include "client/keepalivetask.h"
 #include "client/status.h"
 #include "client/txmpppump.h"  // Needed for TXmppPumpNotify
-#include "client/voiceclient.h"
+
+#ifdef IOS_XMPP_FRAMEWORK
+#include "VoiceClientExample/VoiceClientDelegate.h"
+#endif
 
 namespace talk_base {
 class BasicNetworkManager;
@@ -75,6 +79,20 @@ class PresenceOutTask;
 
 namespace tuenti {
 
+#ifndef IOS_XMPP_FRAMEWORK
+struct StunConfig {
+  std::string stun;
+  std::string turn;
+  std::string turn_username;
+  std::string turn_password;
+  std::string ToString() {
+    std::stringstream stream;
+    stream << "[stun=(" << stun << "),";
+    stream << "turn=(" << turn << ")]";
+    return stream.str();
+  }
+};
+#endif
 class TXmppPump;
 class VoiceClientNotify;
 
@@ -82,6 +100,7 @@ enum ClientSignals {
   // From Main to Worker
   // ST_MSG_WORKER_DONE is defined in SignalThread.h
   MSG_LOGIN = talk_base::SignalThread::ST_MSG_FIRST_AVAILABLE,
+  MSG_LOGIN_TIMEOUT,
   MSG_DISCONNECT,  // Logout
   MSG_CALL,
   MSG_ACCEPT_CALL,
@@ -103,7 +122,7 @@ enum ClientSignals {
   MSG_INCOMING_MESSAGE,
   MSG_ROSTER_ADD,
   MSG_ROSTER_REMOVE,
-  MSG_ROSTER_RESET,
+  MSG_PRESENCE_CHANGED
 };
 
 #if LOGGING
@@ -112,6 +131,7 @@ struct ClientSignalingMap : std::map<unsigned int, std::string>
   ClientSignalingMap()
   {
   this->operator[]( MSG_LOGIN ) = "MSG_LOGIN";
+  this->operator[]( MSG_LOGIN_TIMEOUT ) = "MSG_LOGIN_TIMEOUT";
   this->operator[]( MSG_DISCONNECT ) = "MSG_DISCONNECT";
   this->operator[]( MSG_CALL ) = "MSG_CALL";
   this->operator[]( MSG_ACCEPT_CALL ) = "MSG_ACCEPT_CALL";
@@ -131,7 +151,7 @@ struct ClientSignalingMap : std::map<unsigned int, std::string>
   this->operator[]( MSG_INCOMING_MESSAGE ) = "MSG_INCOMING_MESSAGE";
   this->operator[]( MSG_ROSTER_ADD ) = "MSG_ROSTER_ADD";
   this->operator[]( MSG_ROSTER_REMOVE ) = "MSG_ROSTER_REMOVE";
-  this->operator[]( MSG_ROSTER_RESET ) = "MSG_ROSTER_RESET";
+  this->operator[]( MSG_PRESENCE_CHANGED ) = "MSG_PRESENCE_CHANGED";
   };
   ~ClientSignalingMap(){};
 };
@@ -257,14 +277,19 @@ class ClientSignalingThread
       public sigslot::has_slots<>,
       public TXmppPumpNotify {
  public:
+#ifdef IOS_XMPP_FRAMEWORK
+  ClientSignalingThread(VoiceClientDelegate* voiceClientDelegate);
+#else
   ClientSignalingThread();
+#endif
   virtual ~ClientSignalingThread();
   // Public Library Callbacks
   void OnSessionState(cricket::Call* call, cricket::Session* session,
                       cricket::Session::State state);
   void OnSessionError(cricket::Call* call, cricket::Session* session,
                       cricket::Session::Error error);
-  void OnStatusUpdate(const buzz::Status& status);
+  void OnContactAdded(const std::string& jid, const std::string& nick, int available, int show);
+  void OnPresenceChanged(const std::string& jid, int available, int show);
   // OnStateChange Needed by TXmppPumpNotify maybe better in another class
   void OnStateChange(buzz::XmppEngine::State state);
   void OnXmppSocketClose(int state);
@@ -277,11 +302,13 @@ class ClientSignalingThread
   void OnPingTimeout();
   void OnAudioPlayout();
   void OnCallStatsUpdate(char *statsString);
+  void Ping();
   // These are signal thread entry points that will be farmed
   // out to the worker equivilent functions
   void Login(const std::string &username, const std::string &password,
              StunConfig* stun_config, const std::string &xmpp_host,
-             int xmpp_port, bool use_ssl, uint32 port_allocator_filter);
+             int xmpp_port, bool use_ssl, uint32 port_allocator_filter,
+			 bool is_gtalk);
   void Disconnect();
   void Call(std::string remoteJid, std::string call_tracker_id);
   void AcceptCall(uint32 call_id);
@@ -291,8 +318,11 @@ class ClientSignalingThread
   void HoldCall(uint32 call_id, bool hold);
   void SendXmppMessage(const tuenti::XmppMessage m);
   void ReplaceTurn(const std::string &turn);
-
-
+#if IOS_XMPP_FRAMEWORK
+  talk_base::Thread* GetSignalThread() {
+    return signal_thread_;
+  }
+#endif
   // signals
   sigslot::signal3<int, const char *, int> SignalCallStateChange;
   sigslot::signal2<int, const char *> SignalCallTrackerId;
@@ -304,9 +334,11 @@ class ClientSignalingThread
   sigslot::signal1<const XmppMessage> SignalXmppMessage;
 
   sigslot::signal0<> SignalAudioPlayout;
-  sigslot::signal0<> SignalBuddyListReset;
-  sigslot::signal1<const RosterItem> SignalBuddyListRemove;
-  sigslot::signal1<const RosterItem> SignalBuddyListAdd;
+
+  sigslot::signal1<const std::string&> SignalBuddyListRemove;
+  sigslot::signal3<const std::string&, int, int> SignalPresenceChanged;
+  sigslot::signal4<const std::string&, const std::string&, int, int> SignalBuddyListAdd;
+
   sigslot::signal1<const char *> SignalStatsUpdate;
 
 
@@ -339,10 +371,6 @@ class ClientSignalingThread
 
   void SetPortAllocatorFilter(uint32 filter) { port_allocator_filter_ = filter; };
 
-  // data
-  typedef std::map<std::string, RosterItem> RosterMap;
-  typedef std::map<std::string, int> BuddyListMap;
-
   std::string turn_username_;
   std::string turn_password_;
 
@@ -354,21 +382,26 @@ class ClientSignalingThread
   talk_base::scoped_ptr<buzz::XmppRosterModule> sp_roster_module_;
   talk_base::scoped_ptr<tuenti::RosterHandler> sp_roster_handler_;
   talk_base::scoped_ptr<talk_base::BasicNetworkManager> sp_network_manager_;
+  talk_base::scoped_ptr<talk_base::SSLIdentity> sp_ssl_identity_;
 
   talk_base::Thread *signal_thread_;
-  talk_base::scoped_ptr<talk_base::Thread> main_thread_;
-  RosterMap *roster_;
-  BuddyListMap *buddy_list_;
+  talk_base::scoped_ptr<talk_base::AutoThread> main_thread_;
+#ifdef IOS_XMPP_FRAMEWORK
+  VoiceClientDelegate* voiceClientDelegate_;
+#endif
+  bool auto_accept_;
   buzz::PresenceOutTask* presence_out_;
   buzz::PingTask* ping_task_;
   KeepAliveTask * keepalive_task_;
   ReceiveMessageTask *receive_message_task_;
   cricket::SessionManagerTask *session_manager_task_;
   cricket::Call* call_;
+  cricket::SecurePolicy sdes_policy_;
+  cricket::SecurePolicy dtls_policy_;
+  cricket::TransportProtocol transport_protocol_;
   uint32 port_allocator_flags_;
   uint32 port_allocator_filter_;
   bool use_ssl_;
-  bool auto_accept_;
   bool is_caller_;
   buzz::XmppEngine::State xmpp_state_;
   StunConfig *stun_config_;
@@ -377,6 +410,7 @@ class ClientSignalingThread
   buzz::Status my_status_;
   buzz::XmppClientSettings xcs_;
   talk_base::PhysicalSocketServer pss_;
+  talk_base::CriticalSection disconnect_cs_;
 #if LOGGING
   ClientSignalingMap client_signal_map_debug_;
   XmppEngineErrorMap xmpp_error_map_debug_;

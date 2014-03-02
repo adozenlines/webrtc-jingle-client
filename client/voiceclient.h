@@ -27,11 +27,6 @@
 #ifndef CLIENT_VOICECLIENT_H_
 #define CLIENT_VOICECLIENT_H_
 
-#ifdef ANDROID
-#include <jni.h>
-#include "client/helpers.h"
-#endif
-
 #include <string>
 
 #include "talk/p2p/base/session.h"
@@ -39,50 +34,34 @@
 #include "talk/session/media/mediamessages.h"
 #include "talk/session/media/mediasessionclient.h"
 #include "talk/xmpp/xmppclient.h"
-#include "talk/examples/login/xmpppump.h"
 #include "talk/base/criticalsection.h"
 
+#include "client/clientsignalingthread.h"
 #include "client/status.h"
 #include "client/xmppmessage.h"
+#include "client/txmpppump.h"
+
+#ifdef IOS_XMPP_FRAMEWORK
+#include "VoiceClientExample/VoiceClientDelegate.h"
+#endif
 
 namespace tuenti {
 
 typedef enum {
   ADD,
   REMOVE,
-  RESET
 } BuddyList;
 
-typedef struct {
-  buzz::Jid jid;
-  buzz::Status::Show show;
-  std::string status;
-  std::string nick;
-} RosterItem;
-
-typedef struct {
-  std::string stun;
-  std::string turn;
-  std::string turn_username;
-  std::string turn_password;
-  std::string ToString() {
-    std::stringstream stream;
-    stream << "[stun=(" << stun << "),";
-    stream << "turn=(" << turn << ")]";
-    return stream.str();
-  }
-} StunConfig;
 
 class ClientSignalingThread;
 
 class VoiceClient: public sigslot::has_slots<> {
  public:
   // initialization
-#ifdef ANDROID
-  explicit VoiceClient(JavaObjectReference *reference);
-#elif IOS
-  explicit VoiceClient();
+#if IOS_XMPP_FRAMEWORK
+  explicit VoiceClient(VoiceClientDelegate* voiceClientDelegate);
 #endif
+  explicit VoiceClient();
   ~VoiceClient();
   void Init();
   void Destroy();
@@ -90,8 +69,9 @@ class VoiceClient: public sigslot::has_slots<> {
   // passthru functions
   void Login(const std::string &username, const std::string &password,
     StunConfig *stun_config, const std::string &xmpp_host,
-    int xmpp_port, bool use_ssl, int port_allocator_filter);
+    int xmpp_port, bool use_ssl, int port_allocator_filter, bool is_gtalk);
   void Disconnect();
+  void Ping();
   void Call(std::string remote_jid);
   void SendMessage(const std::string &remote_jid, const int &state, const std::string &msg);
   void CallWithTracker(std::string remoteJid, std::string call_tracker_id);
@@ -102,26 +82,14 @@ class VoiceClient: public sigslot::has_slots<> {
   void DeclineCall(uint32 call_id, bool busy);
   void ReplaceTurn(const std::string &turn);
 
-  // signals
-  void OnSignalCallStateChange(int state, const char *remote_jid, int call_id);
-  void OnSignalCallError(int error, int call_id);
-  void OnSignalAudioPlayout();
-  void OnSignalXmppMessage(const XmppMessage msg);
+  ClientSignalingThread* SignalingThread();
 
-  void OnSignalXmppError(int error);
-  void OnSignalXmppSocketClose(int state);
-  void OnSignalXmppStateChange(int state);
-  void OnSignalBuddyListReset();
-  void OnSignalBuddyListRemove(const RosterItem item);
-  void OnSignalBuddyListAdd(const RosterItem item);
-  void OnSignalStatsUpdate(const char *stats);
-  void OnSignalCallTrackerId(int call_id, const char *call_tracker_id);
-
+#if IOS_XMPP_FRAMEWORK
+  talk_base::Thread* GetSignalThread();
+  VoiceClientDelegate* voiceClientDelegate_;
+#endif
   std::string stunserver_;
   std::string relayserver_;
-#ifdef ANDROID
-  JavaObjectReference *reference_;
-#endif
   tuenti::ClientSignalingThread *client_signaling_thread_;
   StunConfig *stun_config_;
   talk_base::CriticalSection destroy_cs_;
