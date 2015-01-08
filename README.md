@@ -1,3 +1,11 @@
+Deprecated
+==========
+This project began when webrtc was just getting it's start and there were many bugs and sdp implementation wasn't even code complete, and drivers for the different phones weren't working and the build for ios/android was broken from one version to another, and the code wasn't even compatible at times with native builds for hundreds of revisions. I built this project out of a necessity to have a more stable project, that was cut down and had the right build variables for the native project, i.e. video didn't work, so I removed it. Over time, many issues have been sovled in the core, and I've moved on to other projects after launching a voip solution on this codebase quite a while ago.
+
+I haven't dropped in on webrtc in quite a while now, but I do know that you can use wrappers to convert jingle to sdp and that they do work. If you're set on this solution, instead of a native converter and using webrtc, I suggest you update all the linked repos in this project and because they're probably quite out of date at this point.
+
+One of the java engineers who worked on this codebase went on to switch to using the webrtc api directly, and using a converter for the xmpp stack. https://github.com/tuenti/sdp-to-jingle-java
+
 webrtc-jingle for android
 =============
 (libjingle signaling + webrtc voice engine) 
@@ -17,6 +25,10 @@ Discussion: [webrtc-jingle](https://groups.google.com/forum/?fromgroups#!forum/w
 * Download and install [depot_tools](http://dev.chromium.org/developers/how-tos/install-depot-tools)
 
 ```
+# IMPORTANT:- gclient command from [depot_tools](http://dev.chromium.org/developers/how-tos/install-depot-tools) 
+# has to be used to checkout the project else the third_party dependencies don't get pulled 
+# 
+
 # mkdir webrtcjingleproject
 # cd webrtcjingleproject
 # gclient config https://github.com/lukeweber/webrtc-jingle-client.git --name trunk
